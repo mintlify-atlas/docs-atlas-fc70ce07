@@ -1,0 +1,143 @@
+---
+title: 'Installation'
+description: 'Install the Threatest CLI or Go library using Homebrew, binary releases, Docker, or go get.'
+---
+
+## Prerequisites
+
+- **Go 1.22 or later** — required when using Threatest as a Go library or building from source
+- **Datadog account** — required for the Datadog alert matcher; see [environment variables](#environment-variables)
+- Cloud provider credentials (AWS, GCP, Azure) — required only when using the Stratus Red Team or AWS CLI detonators
+
+---
+
+## CLI installation
+
+The Threatest CLI lets you run YAML-based test scenarios from the command line.
+
+<CodeGroup>
+
+```bash homebrew
+brew tap datadog/threatest https://github.com/datadog/threatest
+brew install datadog/threatest/threatest
+```
+
+```bash binary release
+# Download the latest release archive for your platform from:
+# https://github.com/DataDog/threatest/releases
+#
+# Example: Linux x86_64
+curl -LO https://github.com/DataDog/threatest/releases/download/v1.2.4/threatest_Linux_x86_64.tar.gz
+tar -xzf threatest_Linux_x86_64.tar.gz
+sudo mv threatest /usr/local/bin/threatest
+```
+
+</CodeGroup>
+
+Verify the installation:
+
+```bash
+threatest --help
+```
+
+### Available platforms
+
+Binary releases are published for the following platforms:
+
+| Platform | Architecture | Archive name |
+|---|---|---|
+| macOS | Intel (x86_64) | `threatest_Darwin_x86_64.tar.gz` |
+| macOS | Apple Silicon (arm64) | `threatest_Darwin_arm64.tar.gz` |
+| Linux | x86_64 | `threatest_Linux_x86_64.tar.gz` |
+| Linux | arm64 | `threatest_Linux_arm64.tar.gz` |
+| Windows | x86_64 | `threatest_Windows_x86_64.zip` |
+| Windows | arm64 | `threatest_Windows_arm64.zip` |
+
+Each release also includes a `checksums.txt` file you can use to verify the integrity of the downloaded archive.
+
+---
+
+## Docker
+
+A Docker image is available for running the Threatest CLI in containerized environments. Build it from the source repository:
+
+```bash
+docker build -t threatest https://github.com/DataDog/threatest.git
+```
+
+Run a scenario file:
+
+```bash
+docker run --rm \
+  -e DD_API_KEY \
+  -e DD_APP_KEY \
+  -v "$(pwd)/scenarios.threatest.yaml:/scenarios.threatest.yaml" \
+  threatest run /scenarios.threatest.yaml
+```
+
+<Note>
+  The Docker image uses `alpine:3.20` as its runtime base and requires Go 1.22 to build. The `ENTRYPOINT` is the `threatest` binary, so you pass CLI subcommands directly as the Docker command.
+</Note>
+
+---
+
+## Go library
+
+Add Threatest as a dependency in your Go module to use it programmatically inside `go test` functions.
+
+```bash
+go get github.com/datadog/threatest
+```
+
+Import the packages you need in your test file:
+
+```go
+import (
+    . "github.com/datadog/threatest/pkg/threatest"
+    . "github.com/datadog/threatest/pkg/threatest/detonators"
+    . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+)
+```
+
+The module path is `github.com/datadog/threatest` and requires **Go 1.22** or later (as declared in `go.mod`).
+
+<Tip>
+  When using the Stratus Red Team detonator, also import the loader package with a blank identifier so that attack techniques are registered at startup:
+
+  ```go
+  import _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader"
+  ```
+</Tip>
+
+---
+
+## Environment variables
+
+### Required
+
+These variables are required by the Datadog alert matcher regardless of whether you use the CLI or the Go library:
+
+| Variable | Description |
+|---|---|
+| `DD_API_KEY` | Datadog API key |
+| `DD_APP_KEY` | Datadog application key |
+
+### Optional
+
+| Variable | Description | Default |
+|---|---|---|
+| `DD_SITE` | Datadog site URL (e.g. `datadoghq.eu`) | `datadoghq.com` |
+
+### CLI SSH configuration
+
+When running SSH-based scenarios with the CLI, you can set host parameters via flags or environment variables:
+
+| Flag | Environment variable | Description |
+|---|---|---|
+| `--ssh-host` | `THREATEST_SSH_HOST` | Hostname or IP of the remote machine |
+| `--ssh-username` | `THREATEST_SSH_USERNAME` | SSH username |
+| `--ssh-key` | `THREATEST_SSH_KEY` | Path to the SSH private key file |
+
+<Warning>
+  Never commit `DD_API_KEY` or `DD_APP_KEY` to source control. Use a secrets manager or CI environment variable injection instead.
+</Warning>

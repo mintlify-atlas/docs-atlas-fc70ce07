@@ -1,0 +1,153 @@
+---
+title: "Stratus Red Team"
+description: "Detonate cloud attack techniques using Stratus Red Team."
+---
+
+[Stratus Red Team](https://stratus-red-team.cloud) is an open-source adversary emulation tool for cloud environments. It provides a catalog of granular, self-contained attack techniques for AWS, Azure, GCP, and Kubernetes that can be detonated on demand.
+
+The Stratus Red Team detonator integrates directly with the Stratus Red Team Go library, so you can reference any technique by its ID and Threatest will handle warm-up, detonation, and cleanup automatically.
+
+## How it works
+
+Each detonation generates a unique execution ID. Stratus Red Team injects this ID into the AWS **user-agent** header for every API call made during detonation. Threatest's alert matchers search for this ID in matched signals to confirm the alert corresponds to this specific detonation run.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Authenticate to your cloud provider">
+    You must be authenticated to the relevant cloud provider before running a Stratus Red Team scenario. For AWS, configure your credentials using the AWS CLI, an IAM role, or environment variables.
+
+    ```bash
+    aws configure
+    # or
+    export AWS_ACCESS_KEY_ID=...
+    export AWS_SECRET_ACCESS_KEY=...
+    export AWS_SESSION_TOKEN=...   # if using temporary credentials
+    ```
+  </Step>
+  <Step title="Install the Go dependency (programmatic usage)">
+    Add the required import to your Go test file. The `loader` side-effect import registers all available Stratus Red Team techniques at startup.
+
+    ```go
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader"
+    )
+    ```
+
+    <Warning>
+      Without the `loader` import, `StratusRedTeamTechnique()` will panic at runtime because the technique registry will be empty.
+    </Warning>
+  </Step>
+</Steps>
+
+## Usage
+
+<Tabs>
+  <Tab title="CLI (YAML)">
+    Use `stratusRedTeamDetonator.attackTechnique` to specify the technique ID. The value must be a valid [Stratus Red Team attack technique ID](https://stratus-red-team.cloud/attack-techniques/list/).
+
+    ```yaml
+    scenarios:
+      - name: opening a security group to the Internet
+        detonate:
+          stratusRedTeamDetonator:
+            attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+        expectations:
+          - timeout: 15m
+            datadogSecuritySignal:
+              name: "Potential administrative port open to the world via AWS security group"
+    ```
+
+    Run the scenario with:
+
+    ```bash
+    threatest run scenarios.threatest.yaml
+    ```
+  </Tab>
+  <Tab title="Go">
+    Call `StratusRedTeamTechnique()` with the technique ID and pass the result to `WhenDetonating()`.
+
+    ```go
+    package mytest
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader"
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestAWSConsoleLogin(t *testing.T) {
+        threatest := Threatest()
+
+        threatest.Scenario("AWS console login").
+            WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+            Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+            WithTimeout(10 * time.Minute)
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration
+
+<ParamField path="stratusRedTeamDetonator.attackTechnique" type="string" required>
+  The attack technique ID to detonate. Must match a technique in the [Stratus Red Team catalog](https://stratus-red-team.cloud/attack-techniques/list/), for example `aws.exfiltration.ec2-share-ebs-snapshot`.
+</ParamField>
+
+## Example techniques
+
+The following examples are taken directly from the Threatest test suite. Each pairs a Stratus Red Team technique with the Datadog Cloud SIEM signal it is expected to trigger.
+
+```go
+testCases := []struct {
+    StratusRedTeamTTP  string
+    ExpectedSignalName string
+}{
+    {
+        "aws.initial-access.console-login-without-mfa",
+        "AWS Console login without MFA",
+    },
+    {
+        "aws.exfiltration.ec2-security-group-open-port-22-ingress",
+        "Potential administrative port open to the world via AWS security group",
+    },
+    {
+        "aws.exfiltration.ec2-share-ebs-snapshot",
+        "AWS EBS Snapshot possible exfiltration",
+    },
+    {
+        "aws.defense-evasion.cloudtrail-event-selectors",
+        "AWS Disable Cloudtrail with event selectors",
+    },
+}
+```
+
+## Parallelism
+
+You can run multiple Stratus Red Team scenarios in parallel using Go's `t.Parallel()`. Each scenario manages its own Stratus Red Team runner and AWS credentials context.
+
+```go
+for i := range testCases {
+    scenario := testCases[i]
+    t.Run(scenario.StratusRedTeamTTP, func(t *testing.T) {
+        t.Parallel()
+        threatest := Threatest()
+        threatest.Scenario(scenario.StratusRedTeamTTP).
+            WhenDetonating(StratusRedTeamTechnique(scenario.StratusRedTeamTTP)).
+            Expect(DatadogSecuritySignal(scenario.ExpectedSignalName)).
+            WithTimeout(15 * time.Minute)
+
+        require.Nil(t, threatest.Run())
+    })
+}
+```
+
+<Note>
+  Stratus Red Team automatically cleans up infrastructure it provisions (e.g., EC2 instances, IAM roles) after each detonation via a deferred `CleanUp()` call.
+</Note>

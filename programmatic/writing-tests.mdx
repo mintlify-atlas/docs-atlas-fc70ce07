@@ -1,0 +1,280 @@
+---
+title: 'Writing tests'
+description: 'Full API reference and patterns for writing detection tests in Go.'
+---
+
+This page covers every function in the Threatest API and shows how to structure tests — from a single sequential scenario to a parallel data-driven suite.
+
+## API reference
+
+### `Threatest() *TestRunner`
+
+Creates a new test runner. The runner holds a list of scenarios and executes them in order when `Run()` is called.
+
+```go
+threatest := Threatest()
+```
+
+The runner polls for signals every 2 seconds by default. Override with:
+
+```go
+threatest.Interval = 5 * time.Second
+```
+
+---
+
+### `runner.Scenario(name string) *ScenarioBuilder`
+
+Registers a named scenario and returns a builder for configuring it. The name appears in log output and error messages.
+
+```go
+threatest.Scenario("AWS console login without MFA")
+```
+
+---
+
+### `builder.WhenDetonating(detonator Detonator) *ScenarioBuilder`
+
+Sets the detonator — the component that executes the attack. The `Detonator` interface has a single method:
+
+```go
+type Detonator interface {
+    Detonate() (string, error)
+}
+```
+
+`Detonate()` returns a unique execution ID (UUID) that is passed to each matcher so it can correlate the detonation to a specific signal.
+
+**Built-in detonators:**
+
+<Tabs>
+  <Tab title="Stratus Red Team">
+    Executes an attack technique from the [Stratus Red Team](https://stratus-red-team.cloud/) library. Requires the blank import of the loader package.
+
+    ```go
+    WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa"))
+    ```
+
+    The technique ID is the full Stratus Red Team TTP identifier.
+  </Tab>
+  <Tab title="SSH command">
+    Runs a shell command on a remote host over SSH. Reads connection details from `~/.ssh/config` if not provided explicitly.
+
+    ```go
+    ssh, err := NewSSHCommandExecutor("test-box", "", "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    WhenDetonating(NewCommandDetonator(ssh, "curl http://169.254.169.254 --connect-timeout 5"))
+    ```
+
+    Arguments to `NewSSHCommandExecutor`: hostname, username (empty = read from SSH config), key file path (empty = read from SSH config).
+  </Tab>
+  <Tab title="Local command">
+    Runs a shell command on the local machine using `bash -c`.
+
+    ```go
+    localExecutor := &LocalCommandExecutor{}
+    WhenDetonating(NewCommandDetonator(localExecutor, "curl http://169.254.169.254 --connect-timeout 5"))
+    ```
+  </Tab>
+  <Tab title="AWS SDK">
+    Executes arbitrary AWS SDK calls with the detonation UUID injected into the `User-Agent` header, enabling the Datadog matcher to correlate API calls to signals.
+
+    ```go
+    WhenDetonating(NewAWSDetonator(func(awsConfig aws.Config, detonationUuid uuid.UUID) error {
+        iamClient := iam.NewFromConfig(awsConfig)
+        _, err := iamClient.CreateUser(context.Background(), &iam.CreateUserInput{
+            UserName: aws.String("my-user"),
+        })
+        return err
+    }))
+    ```
+  </Tab>
+  <Tab title="AWS CLI">
+    Runs a shell script that calls the AWS CLI, with the detonation UUID set in the `AWS_EXECUTION_ENV` environment variable.
+
+    ```go
+    WhenDetonating(NewAWSCLIDetonator(`aws iam create-user --user-name my-user`))
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+### `builder.Expect(matcher AlertGeneratedMatcher) *ScenarioBuilder`
+
+Adds an assertion. Call `Expect()` multiple times on the same scenario to assert on several signals — all must match before the scenario passes.
+
+```go
+threatest.Scenario("AWS console login").
+    WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+    Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+    Expect(DatadogSecuritySignal("An IAM user was created"))
+```
+
+**Datadog matcher:**
+
+```go
+// Match by rule name only
+DatadogSecuritySignal("rule name")
+
+// Match by rule name and severity
+DatadogSecuritySignal("rule name").WithSeverity("medium")
+```
+
+Severity values follow the Datadog API: `"info"`, `"low"`, `"medium"`, `"high"`, `"critical"`.
+
+The `AlertGeneratedMatcher` interface, which you can implement for custom matchers:
+
+```go
+type AlertGeneratedMatcher interface {
+    HasExpectedAlert(uuid string) (bool, error)
+    String() string
+    Cleanup(uuid string) error
+}
+```
+
+---
+
+### `builder.WithTimeout(duration time.Duration) *ScenarioBuilder`
+
+Sets a per-scenario deadline. The runner stops polling when the deadline is exceeded and counts any unmatched assertions as failures.
+
+```go
+.WithTimeout(15 * time.Minute)
+```
+
+The default timeout is **10 minutes** if `WithTimeout` is not called. Set to `0` to disable the deadline entirely.
+
+---
+
+### `runner.Run() error`
+
+Executes all registered scenarios sequentially and returns an aggregated error if any failed.
+
+```go
+err := threatest.Run()
+```
+
+A failed run produces a message like:
+
+```
+At least one scenario failed:
+
+curl to metadata service returned: curl to metadata service: 1 assertions did not pass
+ => Did not find Datadog security signal 'EC2 Instance Metadata Service Accessed via Network Utility'
+Java spawning shell returned: Java spawning shell: 1 assertions did not pass
+ => Did not find Datadog security signal 'Java process spawned shell/utility'
+```
+
+Each line names the scenario, how many assertions failed, and the string representation of each unmatched assertion.
+
+## Test patterns
+
+### Sequential scenarios
+
+All scenarios in a single `TestRunner` run one after another. This is the simplest approach:
+
+```go
+func TestCloudSIEMAWSAlerts(t *testing.T) {
+    threatest := Threatest()
+
+    threatest.Scenario("AWS console login").
+        WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+        Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+        WithTimeout(10 * time.Minute)
+
+    threatest.Scenario("Opening port 22 of a security group to the Internet").
+        WhenDetonating(StratusRedTeamTechnique("aws.exfiltration.ec2-security-group-open-port-22-ingress")).
+        Expect(DatadogSecuritySignal("Potential administrative port open to the world via AWS security group")).
+        WithTimeout(10 * time.Minute)
+
+    threatest.Scenario("Exfiltrating an EBS snapshot").
+        WhenDetonating(StratusRedTeamTechnique("aws.exfiltration.ec2-share-ebs-snapshot")).
+        Expect(DatadogSecuritySignal("AWS EBS Snapshot possible exfiltration")).
+        WithTimeout(10 * time.Minute)
+
+    require.Nil(t, threatest.Run())
+}
+```
+
+<Note>
+  `Run()` stops processing after every scenario — even if one fails, the remaining scenarios still execute. The error returned is an aggregate of all failures.
+</Note>
+
+### Parallel data-driven tests
+
+For faster feedback, use Go's built-in `t.Parallel()` with table-driven tests. Each sub-test gets its own `TestRunner` with a single scenario. Go runs the sub-tests concurrently:
+
+```go
+func TestCloudSIEMAWSAlertsParallel(t *testing.T) {
+    testCases := []struct {
+        StratusRedTeamTTP  string
+        ExpectedSignalName string
+    }{
+        {"aws.initial-access.console-login-without-mfa", "AWS Console login without MFA"},
+        {"aws.exfiltration.ec2-security-group-open-port-22-ingress", "Potential administrative port open to the world via AWS security group"},
+        {"aws.exfiltration.ec2-share-ebs-snapshot", "AWS EBS Snapshot possible exfiltration"},
+        {"aws.defense-evasion.cloudtrail-event-selectors", "AWS Disable Cloudtrail with event selectors"},
+    }
+
+    for i := range testCases {
+        scenario := testCases[i]
+        t.Run(scenario.StratusRedTeamTTP, func(t *testing.T) {
+            t.Parallel()
+            threatest := Threatest()
+            threatest.Scenario(scenario.StratusRedTeamTTP).
+                WhenDetonating(StratusRedTeamTechnique(scenario.StratusRedTeamTTP)).
+                Expect(DatadogSecuritySignal(scenario.ExpectedSignalName)).
+                WithTimeout(15 * time.Minute)
+
+            require.Nil(t, threatest.Run())
+        })
+    }
+}
+```
+
+<Tip>
+  When using `t.Parallel()`, capture the loop variable before the closure — `scenario := testCases[i]` — to avoid the common Go loop variable capture bug.
+</Tip>
+
+**Sequential vs. parallel — when to use which:**
+
+| | Sequential | Parallel |
+|---|---|---|
+| Test isolation | Scenarios share a runner; errors aggregate | Each sub-test is independent; failures are reported per sub-test |
+| Speed | Scenarios run one after another | Sub-tests run concurrently — faster for large suites |
+| `go test` output | Single `PASS`/`FAIL` line | Per sub-test lines with individual timings |
+| Best for | Small suites, ordered setup/teardown | Large suites with independent scenarios |
+
+## Error handling
+
+`Run()` returns `nil` on success or an `error` describing every failed scenario. Three patterns are common:
+
+<Tabs>
+  <Tab title="require.Nil (fail fast)">
+    ```go
+    require.Nil(t, threatest.Run())
+    ```
+
+    Stops the test immediately on failure. Use when a failure in one test makes the others irrelevant.
+  </Tab>
+  <Tab title="assert.Nil (continue on failure)">
+    ```go
+    assert.Nil(t, threatest.Run())
+    ```
+
+    Marks the test as failed but continues execution. Use when you want to observe remaining behavior after a failure.
+  </Tab>
+  <Tab title="Manual error handling">
+    ```go
+    if err := threatest.Run(); err != nil {
+        fmt.Println("Test failed: " + err.Error())
+        t.Fail()
+    }
+    ```
+
+    Use when you need to inspect or log the error before failing.
+  </Tab>
+</Tabs>

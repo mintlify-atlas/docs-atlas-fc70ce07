@@ -1,0 +1,209 @@
+---
+title: "SSH detonator"
+description: "Run attack commands on a remote host over SSH to test endpoint and Cloud Workload Security detections."
+---
+
+The SSH detonator connects to a remote host over SSH and executes shell commands there. It is designed for testing **Cloud Workload Security (CWS)** and other endpoint-level detections where the suspicious activity must happen on a specific machine monitored by a security agent.
+
+## How UUID correlation works
+
+For each command execution, Threatest generates a UUID and wraps the original command using `FormatCommand`:
+
+```
+cp /bin/bash /tmp/<uuid>; (/tmp/<uuid> -c <command> || true) && rm /tmp/<uuid>
+```
+
+This renames `bash` to the UUID before running your command. The Datadog agent observes the parent process name containing the UUID, which Threatest later searches for in the signal's attributes to confirm the alert matches this specific detonation.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Provision a target host with a Datadog agent">
+    The remote host must have the Datadog agent installed and configured with Cloud Workload Security enabled. The agent must be able to forward signals to your Datadog organization.
+  </Step>
+  <Step title="Prepare an SSH key pair">
+    Generate an unencrypted private key and authorize its public key on the remote host.
+
+    ```bash
+    ssh-keygen -t ed25519 -f ~/.ssh/threatest_key -N ""
+    ssh-copy-id -i ~/.ssh/threatest_key.pub user@target-host
+    ```
+
+    <Warning>
+      Only **unencrypted** SSH private keys are supported. Keys protected with a passphrase will fail to parse. Remove the passphrase with `ssh-keygen -p -f ~/.ssh/your_key` if needed.
+    </Warning>
+  </Step>
+  <Step title="Verify SSH connectivity">
+    Confirm you can reach the host before running Threatest scenarios.
+
+    ```bash
+    ssh -i ~/.ssh/threatest_key user@target-host echo "ok"
+    ```
+  </Step>
+</Steps>
+
+## Usage
+
+<Tabs>
+  <Tab title="CLI (YAML)">
+    Use `remoteDetonator.commands` to list the shell commands to execute. Pass SSH connection details as CLI flags or environment variables when running `threatest run`.
+
+    ```yaml
+    scenarios:
+      - name: curl metadata service
+        detonate:
+          remoteDetonator:
+            commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+        expectations:
+          - timeout: 1m
+            datadogSecuritySignal:
+              name: "Network utility accessed cloud metadata service"
+              severity: medium
+    ```
+
+    Run with SSH flags:
+
+    ```bash
+    threatest run scenarios.threatest.yaml \
+      --ssh-host target-host \
+      --ssh-username ubuntu \
+      --ssh-key ~/.ssh/threatest_key
+    ```
+
+    Or set environment variables instead:
+
+    ```bash
+    export THREATEST_SSH_HOST=target-host
+    export THREATEST_SSH_USERNAME=ubuntu
+    export THREATEST_SSH_KEY=~/.ssh/threatest_key
+
+    threatest run scenarios.threatest.yaml
+    ```
+  </Tab>
+  <Tab title="Go">
+    Create an `SSHCommandExecutor` and pass it to `NewCommandDetonator` along with the command to run.
+
+    ```go
+    package mytest
+
+    import (
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCWSAlerts(t *testing.T) {
+        ssh, err := NewSSHCommandExecutor("test-box", "", "")
+        if err != nil {
+            t.Fatal(err)
+        }
+
+        threatest := Threatest()
+
+        threatest.Scenario("curl to metadata service").
+            WhenDetonating(NewCommandDetonator(ssh, "curl http://169.254.169.254 --connect-timeout 5")).
+            Expect(DatadogSecuritySignal("EC2 Instance Metadata Service Accessed via Network Utility"))
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## CLI flags reference
+
+<ParamField path="--ssh-host" type="string">
+  Hostname or IP address of the target machine. Also readable from the `THREATEST_SSH_HOST` environment variable.
+</ParamField>
+
+<ParamField path="--ssh-username" type="string">
+  SSH username to authenticate as. Leave empty to fall back to the value configured in `~/.ssh/config` for the given host. Also readable from `THREATEST_SSH_USERNAME`.
+</ParamField>
+
+<ParamField path="--ssh-key" type="string">
+  Path to the unencrypted private key file. Supports `~/` expansion. Leave empty to fall back to the `IdentityFile` configured in `~/.ssh/config`. Also readable from `THREATEST_SSH_KEY`.
+</ParamField>
+
+## SSH config file support
+
+If you omit `--ssh-username`, `--ssh-key`, or the port, Threatest reads `~/.ssh/config` for the given hostname and applies any matching `User`, `IdentityFile`, `HostName`, and `Port` directives. This means you can manage connection details centrally in your SSH config rather than passing them on every command.
+
+```
+# ~/.ssh/config
+Host test-box
+  HostName 10.0.1.42
+  User ubuntu
+  IdentityFile ~/.ssh/threatest_key
+  Port 22
+```
+
+With this config in place, the following is sufficient:
+
+```bash
+threatest run scenarios.threatest.yaml --ssh-host test-box
+```
+
+## Real-world example
+
+The following test suite covers several Cloud Workload Security detection rules. Each test case runs in parallel over a shared SSH connection.
+
+```go
+func TestCWSAlertsV2(t *testing.T) {
+    testCases := []struct {
+        Name               string
+        Command            string
+        ExpectedSignalName string
+    }{
+        {
+            "curl to metadata service",
+            "curl http://169.254.169.254 --connect-timeout 5",
+            "EC2 Instance Metadata Service Accessed via Network Utility",
+        },
+        {
+            "java spawns shell",
+            `cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"`,
+            "Java process spawned shell/utility",
+        },
+        {
+            "creating a new user",
+            `sudo useradd -M rick; sudo userdel rick`,
+            "User Created Interactively",
+        },
+        {
+            "requesting a paste site",
+            `curl https://pastebin.com/raw/8UGTX14N`,
+            "DNS Lookup Made for Paste Site",
+        },
+        {
+            "using passwd",
+            `passwd --status $(whoami)`,
+            "Passwd utility executed",
+        },
+    }
+
+    ssh, err := NewSSHCommandExecutor("test-box", "", "")
+    if err != nil {
+        t.Fatal("Unable to connect over SSH: " + err.Error())
+    }
+
+    for i := range testCases {
+        test := testCases[i]
+        t.Run(test.Name, func(t *testing.T) {
+            t.Parallel()
+            threatest := Threatest()
+            threatest.Scenario(test.Name).
+                WhenDetonating(NewCommandDetonator(ssh, test.Command)).
+                Expect(DatadogSecuritySignal(test.ExpectedSignalName)).
+                WithTimeout(1 * time.Minute)
+            require.Nil(t, threatest.Run())
+        })
+    }
+}
+```
+
+<Note>
+  When using the CLI, each scenario that uses a remote detonator opens its own SSH connection. If you are running many scenarios in parallel, ensure the target host's SSH daemon allows enough concurrent sessions.
+</Note>

@@ -1,0 +1,150 @@
+---
+title: "Datadog security signals"
+description: "Assert that a Datadog Cloud SIEM or Cloud Workload Security signal was generated for a specific detonation."
+---
+
+The Datadog security signals matcher polls the Datadog Security Monitoring API and checks whether a signal matching your expected rule name—and tied to the current detonation's UUID—appears within the configured timeout.
+
+## How matching works
+
+After detonation, Threatest repeatedly queries the Datadog Security Monitoring API for open signals from the last hour. The query filters by rule name and optional severity. For each returned signal, Threatest checks whether the signal's raw attributes contain the detonation UUID. Because every detonator injects the UUID into its activity (user-agent, process name, or environment variable), a UUID match confirms the signal corresponds to this specific test run rather than an unrelated event.
+
+Once a matching signal is found, Threatest archives it with the reason `testing_or_maintenance` to keep your signal queue clean.
+
+## Prerequisites
+
+Set the following environment variables before running Threatest:
+
+| Variable | Required | Description |
+|---|---|---|
+| `DD_API_KEY` | Yes | Datadog API key with `security_monitoring_signals_read` permission. |
+| `DD_APP_KEY` | Yes | Datadog Application key with `security_monitoring_signals_read` and `security_monitoring_signals_write` permissions. |
+| `DD_SITE` | No | Datadog site. Defaults to `datadoghq.com`. |
+
+```bash
+export DD_API_KEY=your_api_key
+export DD_APP_KEY=your_app_key
+export DD_SITE=datadoghq.com   # optional
+```
+
+<Note>
+  Supported `DD_SITE` values include `datadoghq.com`, `datadoghq.eu`, `us3.datadoghq.com`, `us5.datadoghq.com`, and `ap1.datadoghq.com`.
+</Note>
+
+## Usage
+
+<Tabs>
+  <Tab title="CLI (YAML)">
+    Use `datadogSecuritySignal.name` to specify the exact rule name to match. Add `datadogSecuritySignal.severity` to further narrow the match.
+
+    ```yaml
+    scenarios:
+      - name: curl metadata service
+        detonate:
+          remoteDetonator:
+            commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+        expectations:
+          - timeout: 1m
+            datadogSecuritySignal:
+              name: "Network utility accessed cloud metadata service"
+              severity: medium
+
+      - name: opening a security group to the Internet
+        detonate:
+          stratusRedTeamDetonator:
+            attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+        expectations:
+          - timeout: 15m
+            datadogSecuritySignal:
+              name: "Potential administrative port open to the world via AWS security group"
+    ```
+  </Tab>
+  <Tab title="Go">
+    Call `DatadogSecuritySignal()` with the rule name and optionally chain `.WithSeverity()`. Pass the result to `.Expect()`.
+
+    ```go
+    package mytest
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader"
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCloudSIEMAlerts(t *testing.T) {
+        threatest := Threatest()
+
+        // Match by rule name only
+        threatest.Scenario("AWS console login").
+            WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+            Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+            WithTimeout(10 * time.Minute)
+
+        // Match by rule name and severity
+        threatest.Scenario("Exfiltrating an EBS snapshot").
+            WhenDetonating(StratusRedTeamTechnique("aws.exfiltration.ec2-share-ebs-snapshot")).
+            Expect(DatadogSecuritySignal("AWS EBS Snapshot possible exfiltration")).
+            WithTimeout(10 * time.Minute)
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration
+
+<ParamField path="datadogSecuritySignal.name" type="string" required>
+  The exact name of the Datadog detection rule to match. This is matched against `@workflow.rule.name` in the signal search query. The match is case-sensitive and must be an exact string.
+</ParamField>
+
+<ParamField path="datadogSecuritySignal.severity" type="string">
+  Optional severity filter. When set, only signals with the given severity are considered. Accepted values: `info`, `low`, `medium`, `high`, `critical`.
+</ParamField>
+
+## Timeout configuration
+
+Each expectation has its own timeout. Threatest polls the Datadog API on a 2-second interval until the signal appears or the timeout is reached.
+
+In YAML, set the timeout per expectation using a duration string:
+
+```yaml
+expectations:
+  - timeout: 15m
+    datadogSecuritySignal:
+      name: "My detection rule"
+```
+
+In Go, chain `.WithTimeout()` on the scenario:
+
+```go
+threatest.Scenario("my scenario").
+    WhenDetonating(...).
+    Expect(DatadogSecuritySignal("My detection rule")).
+    WithTimeout(15 * time.Minute)
+```
+
+<Tip>
+  Cloud SIEM rules that match on CloudTrail events typically need 5–15 minutes for logs to be ingested and processed. CWS rules triggered by live system calls are usually much faster—often under 1 minute.
+</Tip>
+
+## Signal cleanup
+
+After finding a matching signal, Threatest archives it via the Datadog API with the state `archived` and archive reason `testing_or_maintenance`. This keeps your Datadog Security inbox clean and avoids stale open signals from test runs.
+
+The cleanup runs automatically as part of `threatest.Run()`. If a test times out without finding a signal, no archival is performed.
+
+## Signal search scope
+
+Threatest searches open signals created in the **last 1 hour**. Signals older than 1 hour are not considered, regardless of their state. This means:
+
+- Your test timeout should be shorter than 1 hour (this is almost always the case in practice).
+- If you run the same scenario twice within an hour without archiving the first signal, Threatest may match the previous signal. Cleanup between runs prevents this.
+
+<Warning>
+  The Datadog Security Monitoring Signals API currently supports searching up to 1000 open signals. If your organization has more than 1000 open signals at query time, Threatest will return an error rather than a potentially incorrect result.
+</Warning>

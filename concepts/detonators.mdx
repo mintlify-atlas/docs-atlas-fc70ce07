@@ -1,0 +1,278 @@
+---
+title: "Detonators"
+description: "How and where attack techniques are executed in Threatest."
+---
+
+A **detonator** is any type that implements the `Detonator` interface. It knows how to execute a single attack technique and returns a UUID that uniquely identifies that execution.
+
+```go
+// pkg/threatest/detonators/detonator.go
+type Detonator interface {
+    Detonate() (string, error)
+}
+```
+
+The string returned by `Detonate()` is the **detonation UUID**. Every other part of the system — the polling loop, the alert matcher, and the cleanup logic — uses this UUID to track the specific execution. See [Detonation Correlation](/concepts/detonation-correlation) for details.
+
+<Info>
+  Threatest ships five detonator implementations. They all satisfy the same `Detonator` interface, so they are interchangeable in any scenario.
+</Info>
+
+---
+
+## Available detonators
+
+<AccordionGroup>
+  <Accordion title="Local Command Detonator">
+    Runs an OS command on the **local machine** using `bash -c`. The detonation UUID is embedded in the process tree by copying `/bin/bash` to `/tmp/<uuid>` and using that copy as the shell interpreter.
+
+    **Construction**
+
+    The local executor is used through the shared `CommandDetonatorImpl` wrapper. First create a `LocalCommandExecutor`, then pass it to `NewCommandDetonator`:
+
+    ```go
+    // pkg/threatest/detonators/command_detonator.go
+    func NewCommandDetonator(detonator CommandDetonator, command string) *CommandDetonatorImpl {
+        return &CommandDetonatorImpl{
+            Detonator: detonator,
+            Technique: &OSLayerAttackTechnique{Command: command},
+        }
+    }
+    ```
+
+    **Example**
+
+    ```go
+    local := &detonators.LocalCommandExecutor{}
+
+    threatest.Scenario("list shadow file").
+        WhenDetonating(NewCommandDetonator(local, "cat /etc/shadow")).
+        Expect(DatadogSecuritySignal("Sensitive file access"))
+    ```
+
+    **UUID injection**
+
+    `FormatCommand` wraps the raw command so the process is identifiable in the process tree:
+
+    ```go
+    // pkg/threatest/detonators/utils.go
+    func FormatCommand(rawCommand string, detonationUuid string) string {
+        return fmt.Sprintf(
+            `cp /bin/bash /tmp/%[1]s; (/tmp/%[1]s -c %[2]s || true) && rm /tmp/%[1]s`,
+            detonationUuid, shellescape.Quote(rawCommand),
+        )
+    }
+    ```
+
+    The UUID appears as the name of the shell binary in `/tmp`, making it visible in process-level telemetry such as Datadog Cloud Workload Security.
+  </Accordion>
+
+  <Accordion title="SSH Command Detonator">
+    Runs an OS command on a **remote host over SSH**. Connection parameters are resolved from explicit arguments or from the local `~/.ssh/config` file. Each scenario run establishes a fresh SSH session.
+
+    **Construction**
+
+    ```go
+    // pkg/threatest/detonators/ssh_command_detonator.go
+    func NewSSHCommandExecutor(hostname string, username string, keyFile string) (*SSHCommandExecutor, error) {
+        return &SSHCommandExecutor{
+            SSHHostname: hostname,
+            SSHUsername: username,
+            SSHKeyFile:  keyFile,
+        }, nil
+    }
+    ```
+
+    Pass the resulting executor to `NewCommandDetonator` to create the detonator:
+
+    ```go
+    ssh, err := NewSSHCommandExecutor("test-box", "vagrant", "")
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    threatest.Scenario("curl to metadata service").
+        WhenDetonating(NewCommandDetonator(ssh, "curl http://169.254.169.254 --connect-timeout 1")).
+        Expect(DatadogSecuritySignal("EC2 Instance Metadata Service Accessed via Network Utility"))
+    ```
+
+    **Parameters**
+
+    | Parameter | Description |
+    |---|---|
+    | `hostname` | SSH hostname or alias (resolved via `~/.ssh/config`) |
+    | `username` | SSH username. Falls back to the `User` field in `~/.ssh/config` if empty. |
+    | `keyFile` | Path to the private key file. Falls back to `IdentityFile` in `~/.ssh/config` if empty. Supports `~/` prefix. |
+
+    **UUID injection**
+
+    The same `FormatCommand` wrapper used by the local executor is applied here. The UUID becomes the name of the transient shell binary under `/tmp` on the remote host.
+
+    <Note>
+      When running scenarios in parallel via the CLI, each scenario establishes its own independent SSH connection.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Stratus Red Team Detonator">
+    Integrates with [Stratus Red Team](https://stratus-red-team.cloud/) to execute a named cloud attack technique. Stratus handles environment warm-up, detonation, and cleanup automatically. The execution ID is provided by Stratus's own `GetUniqueExecutionId()`.
+
+    **Construction**
+
+    ```go
+    // pkg/threatest/detonators/stratus_red_team.go
+    func StratusRedTeamTechnique(ttp string) *StratusRedTeamDetonator {
+        return &StratusRedTeamDetonator{
+            Technique: stratus.GetRegistry().GetAttackTechniqueByName(ttp),
+        }
+    }
+    ```
+
+    **Example**
+
+    ```go
+    threatest.Scenario("AWS console login without MFA").
+        WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+        Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+        WithTimeout(15 * time.Minute)
+    ```
+
+    **What happens at detonation time**
+
+    ```go
+    func (m *StratusRedTeamDetonator) Detonate() (string, error) {
+        ttp := m.Technique
+        stratusRunner := stratusrunner.NewRunner(ttp, stratusrunner.StratusRunnerNoForce)
+
+        defer stratusRunner.CleanUp()
+
+        if _, err := stratusRunner.WarmUp(); err != nil {
+            return "", err
+        }
+        if err := stratusRunner.Detonate(); err != nil {
+            return "", err
+        }
+
+        executionId := stratusRunner.GetUniqueExecutionId()
+        return executionId, nil
+    }
+    ```
+
+    The runner calls `WarmUp()` (which provisions any required prerequisite infrastructure), then `Detonate()`, then retrieves the unique execution ID Stratus assigned to this run.
+
+    **UUID injection**
+
+    Stratus Red Team injects the execution ID into the AWS SDK user-agent header for all API calls it makes, so CloudTrail logs carry the UUID directly.
+
+    <Tip>
+      You must be authenticated to the target cloud provider before running a Stratus detonation. For AWS, ensure your credentials are configured via environment variables or `~/.aws/credentials`.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="AWS CLI Detonator">
+    Executes an arbitrary shell script that uses the **AWS CLI**, injecting the detonation UUID into every AWS API call via the `AWS_EXECUTION_ENV` environment variable.
+
+    **Construction**
+
+    ```go
+    // pkg/threatest/detonators/aws_cli_detonator.go
+    func NewAWSCLIDetonator(script string) *AWSCLIDetonator {
+        return &AWSCLIDetonator{Script: script}
+    }
+    ```
+
+    **Example**
+
+    ```go
+    script := `
+    set -e
+    vpc=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query Vpc.VpcId --output text)
+    sg=$(aws ec2 create-security-group --group-name sample-sg --description "Test" --vpc-id $vpc --query GroupId --output text)
+    aws ec2 authorize-security-group-ingress --group-id $sg --protocol tcp --port 22 --cidr 0.0.0.0/0
+    aws ec2 delete-security-group --group-id $sg
+    aws ec2 delete-vpc --vpc-id $vpc
+    `
+
+    threatest.Scenario("open security group port 22").
+        WhenDetonating(NewAWSCLIDetonator(script)).
+        Expect(DatadogSecuritySignal("Potential administrative port open to the world via AWS security group")).
+        WithTimeout(15 * time.Minute)
+    ```
+
+    **UUID injection**
+
+    Before running the script, the detonator sets `AWS_EXECUTION_ENV` to `threatest_<uuid>`:
+
+    ```go
+    cmd.Env = append(cmd.Env, "AWS_EXECUTION_ENV=threatest_"+detonationUuid.String())
+    ```
+
+    The AWS CLI includes this value in the `User-Agent` header of every request, so the UUID appears in CloudTrail logs.
+
+    <Note>
+      The detonator performs a credentials sanity check before running the script. If no valid AWS credentials are found, detonation fails immediately with a clear error.
+    </Note>
+  </Accordion>
+
+  <Accordion title="AWS Detonator (programmatic)">
+    For cases where you need full SDK-level control, the `AWSDetonator` accepts an arbitrary Go function that receives a pre-configured `aws.Config` and the detonation UUID. The UUID is injected as a custom `User-Agent` header on every SDK request.
+
+    <Info>
+      This detonator is only available when using Threatest programmatically. It cannot be used from the CLI or YAML scenario files.
+    </Info>
+
+    **Construction**
+
+    ```go
+    // pkg/threatest/detonators/aws_detonator.go
+    func NewAWSDetonator(DetonationFunc func(aws.Config, uuid.UUID) error) *AWSDetonator {
+        return &AWSDetonator{DetonationFunc: DetonationFunc}
+    }
+    ```
+
+    The function signature your detonation logic must match:
+
+    ```go
+    func(awsConfig aws.Config, detonationUuid uuid.UUID) error
+    ```
+
+    **Example**
+
+    ```go
+    detonator := NewAWSDetonator(func(cfg aws.Config, id uuid.UUID) error {
+        client := s3.NewFromConfig(cfg)
+        _, err := client.ListBuckets(context.Background(), &s3.ListBucketsInput{})
+        return err
+    })
+
+    threatest.Scenario("S3 bucket enumeration").
+        WhenDetonating(detonator).
+        Expect(DatadogSecuritySignal("AWS S3 Bucket Enumeration"))
+    ```
+
+    **UUID injection**
+
+    The detonator builds a custom AWS middleware that overwrites the `User-Agent` header on every outbound request:
+
+    ```go
+    request.Header.Set("User-Agent", fmt.Sprintf("threatest_"+uniqueId.String()))
+    ```
+
+    This means the UUID is present in CloudTrail for every API call your function makes, regardless of which AWS service is targeted.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Choosing a detonator
+
+| Detonator | When to use |
+|---|---|
+| Local command | Detecting host-level activity on the machine running your tests |
+| SSH command | Detecting host-level activity on a dedicated test VM |
+| Stratus Red Team | Cloud attack techniques already catalogued in Stratus |
+| AWS CLI | Custom AWS attack workflows expressed as shell scripts |
+| AWS detonator | Custom AWS attack workflows requiring SDK-level control |
+
+<Card title="Detonation Correlation" href="/concepts/detonation-correlation" icon="link">
+  Learn how each detonator embeds the UUID so that only alerts from this exact execution are matched.
+</Card>

@@ -1,0 +1,54 @@
+---
+title: 'Introduction'
+description: 'Threatest is a CLI and Go framework for testing threat detection end-to-end.'
+---
+
+Threatest is a CLI and Go framework for testing threat detection end-to-end. It lets you **detonate** an attack technique against a real environment and then **verify** that the alert you expect was generated in your security platform.
+
+The core idea is simple: if you can't confirm that your detection rules fire when an attack happens, you don't know whether your detections actually work.
+
+## How it works
+
+Each test scenario in Threatest has two parts:
+
+1. **Detonation** — execute an attack technique using one of Threatest's detonators (locally, over SSH, via Stratus Red Team, or through AWS API calls).
+2. **Assertion** — poll your security platform until the expected alert appears, or fail after a configurable timeout.
+
+To ensure a matched alert corresponds to *this specific* detonation and not an unrelated event, Threatest assigns each detonation a UUID. Depending on the detonator, this UUID is injected into the user-agent string (Stratus Red Team, AWS detonator) or embedded in a parent process name (SSH detonator).
+
+## Key features
+
+| Feature | Description |
+|---|---|
+| **Multiple detonators** | Local command execution, SSH, Stratus Red Team, AWS CLI, and programmatic AWS |
+| **Datadog alert matcher** | Poll Datadog Cloud SIEM and Cloud Workload Security for expected security signals |
+| **UUID-based correlation** | Each detonation is uniquely tagged so assertions match the exact event |
+| **Parallel execution** | Run multiple scenarios concurrently; default parallelism is 5 |
+| **YAML scenario files** | Define test suites as declarative YAML for use with the CLI |
+| **JSON output** | Export test results to a machine-readable JSON file for CI pipelines |
+| **Go library** | Embed Threatest directly in Go test functions using `testing.T` |
+
+## Detonators
+
+A **detonator** describes how and where an attack technique is executed.
+
+- **Local** — runs commands directly on the machine where Threatest is running
+- **SSH** — connects to a remote host over SSH and runs commands there
+- **Stratus Red Team** — uses [Stratus Red Team](https://stratus-red-team.cloud/) to detonate pre-built cloud attack techniques
+- **AWS CLI** — runs a shell script that calls the AWS CLI, useful for custom scenarios
+- **AWS (programmatic)** — calls AWS APIs directly from Go code (library only)
+
+## Alert matchers
+
+An **alert matcher** is a platform-specific integration that polls for expected alerts.
+
+- **Datadog security signals** — checks Datadog Cloud SIEM and Cloud Workload Security for signals matching the expected name and severity
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a working detection test running in minutes using either the CLI or Go library.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the Threatest CLI via Homebrew, binary release, Docker, or add it as a Go dependency.
+  </Card>
+</CardGroup>

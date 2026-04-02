@@ -1,0 +1,388 @@
+---
+title: 'Examples'
+description: 'Complete, runnable detection test examples using Threatest as a Go library.'
+---
+
+The examples below are taken directly from the [`examples/programmatic-usage`](https://github.com/DataDog/threatest/tree/main/examples/programmatic-usage) directory of the Threatest repository. Each is a complete, runnable Go test function.
+
+## Cloud SIEM with Stratus Red Team
+
+This example detonates AWS attack techniques using [Stratus Red Team](https://stratus-red-team.cloud/) and asserts that the expected Cloud SIEM signals appear in Datadog.
+
+<Tabs>
+  <Tab title="Parallel (recommended)">
+    Uses a table-driven approach with `t.Parallel()`. Each technique runs in its own sub-test concurrently, and failures are reported individually.
+
+    ```go cloudsiem_alerts_test.go
+    package programmatic_usage
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // Note: This import is needed
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCloudSIEMAWSAlertsParallel(t *testing.T) {
+        testCases := []struct {
+            StratusRedTeamTTP  string
+            ExpectedSignalName string
+        }{
+            {"aws.initial-access.console-login-without-mfa", "AWS Console login without MFA"},
+            {"aws.exfiltration.ec2-security-group-open-port-22-ingress", "Potential administrative port open to the world via AWS security group"},
+            {"aws.exfiltration.ec2-share-ebs-snapshot", "AWS EBS Snapshot possible exfiltration"},
+            {"aws.defense-evasion.cloudtrail-event-selectors", "AWS Disable Cloudtrail with event selectors"},
+        }
+
+        for i := range testCases {
+            scenario := testCases[i]
+            t.Run(scenario.StratusRedTeamTTP, func(t *testing.T) {
+                t.Parallel()
+                threatest := Threatest()
+                threatest.Scenario(scenario.StratusRedTeamTTP).
+                    WhenDetonating(StratusRedTeamTechnique(scenario.StratusRedTeamTTP)).
+                    Expect(DatadogSecuritySignal(scenario.ExpectedSignalName)).
+                    WithTimeout(15 * time.Minute)
+
+                require.Nil(t, threatest.Run())
+            })
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Sequential">
+    Registers all scenarios on a single runner and calls `Run()` once. Scenarios execute one after another.
+
+    ```go cloudsiem_alerts_test.go
+    package programmatic_usage
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // Note: This import is needed
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCloudSIEMAWSAlerts(t *testing.T) {
+        threatest := Threatest()
+        threatest.Interval = 0
+
+        threatest.Scenario("AWS console login").
+            WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+            Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+            WithTimeout(10 * time.Minute)
+
+        threatest.Scenario("Opening port 22 of a security group to the Internet").
+            WhenDetonating(StratusRedTeamTechnique("aws.exfiltration.ec2-security-group-open-port-22-ingress")).
+            Expect(DatadogSecuritySignal("Potential administrative port open to the world via AWS security group")).
+            WithTimeout(10 * time.Minute)
+
+        threatest.Scenario("Exfiltrating an EBS snapshot").
+            WhenDetonating(StratusRedTeamTechnique("aws.exfiltration.ec2-share-ebs-snapshot")).
+            Expect(DatadogSecuritySignal("AWS EBS Snapshot possible exfiltration")).
+            WithTimeout(10 * time.Minute)
+
+        threatest.Scenario("Disabling CloudTrail through event selectors").
+            WhenDetonating(StratusRedTeamTechnique("aws.defense-evasion.cloudtrail-event-selectors")).
+            Expect(DatadogSecuritySignal("AWS Disable Cloudtrail with event selectors")).
+            WithTimeout(10 * time.Minute)
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+**Run:**
+
+```bash
+go test -timeout 99999s cloudsiem_alerts_test.go -v
+```
+
+**Sample output (sequential):**
+
+```
+=== RUN   TestCloudSIEMAWSAlerts
+Detonating 'aws.initial-access.console-login-without-mfa' with Stratus Red Team
+2022/06/16 16:31:08 AWS console login: Confirmed that the expected signal (Datadog security signal 'AWS Console login without MFA') was created in Datadog (took 17 seconds).
+2022/06/16 16:31:08 AWS console login: All assertions passed
+--- PASS: TestCloudSIEMAWSAlerts (126.53s)
+PASS
+```
+
+<Warning>
+  Stratus Red Team provisions real AWS infrastructure during warm-up. Ensure you have the required IAM permissions and are authenticated before running these tests.
+</Warning>
+
+---
+
+## CWS with SSH detonation
+
+This example connects to a remote host over SSH, runs shell commands, and asserts that [Cloud Workload Security (CWS)](https://docs.datadoghq.com/security/cloud_workload_security/) signals appear in Datadog.
+
+It assumes a host named `test-box` is configured in `~/.ssh/config` and has the Datadog Agent with CWS enabled.
+
+<Tabs>
+  <Tab title="Parallel (recommended)">
+    ```go cws_alerts_test.go
+    package programmatic_usage
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // Note: This import is needed
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCWSAlertsV2(t *testing.T) {
+        testCases := []struct {
+            Name               string
+            Command            string
+            ExpectedSignalName string
+        }{
+            {"curl to metadata service", "curl http://169.254.169.254 --connect-timeout 5", "EC2 Instance Metadata Service Accessed via Network Utility"},
+            {"java spawns shell", `cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"`, "Java process spawned shell/utility"},
+            {"creating a new user", `sudo useradd -M rick; sudo userdel rick`, "User Created Interactively"},
+            {"requesting a paste site", `curl https://pastebin.com/raw/8UGTX14N`, "DNS Lookup Made for Paste Site"},
+            {"using passwd", `passwd --status $(whoami)`, "Passwd utility executed"},
+        }
+        ssh, err := NewSSHCommandExecutor("test-box", "", "")
+        if err != nil {
+            t.Fatal("Unable to connect over SSH: " + err.Error())
+        }
+
+        for i := range testCases {
+            test := testCases[i]
+            t.Run(test.Name, func(t *testing.T) {
+                t.Parallel()
+                threatest := Threatest()
+                threatest.Scenario(test.Name).WhenDetonating(NewCommandDetonator(ssh, test.Command)).Expect(DatadogSecuritySignal(test.ExpectedSignalName)).WithTimeout(1 * time.Minute)
+                require.Nil(t, threatest.Run())
+            })
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Sequential">
+    ```go cws_alerts_test.go
+    package programmatic_usage
+
+    import (
+        _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // Note: This import is needed
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+    )
+
+    func TestCWSAlerts(t *testing.T) {
+        ssh, err := NewSSHCommandExecutor("test-box", "", "")
+        if err != nil {
+            t.Fatal(err)
+        }
+
+        threatest := Threatest()
+
+        threatest.Scenario("curl to metadata service").
+            WhenDetonating(NewCommandDetonator(ssh, "curl http://169.254.169.254 --connect-timeout 5")).
+            Expect(DatadogSecuritySignal("EC2 Instance Metadata Service Accessed via Network Utility"))
+
+        threatest.Scenario("Java spawning shell").
+            WhenDetonating(NewCommandDetonator(ssh, `cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"`)).
+            Expect(DatadogSecuritySignal("Java process spawned shell/utility"))
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+**Run:**
+
+```bash
+go test cws_alerts_test.go -v
+```
+
+**Sample output (parallel):**
+
+```
+=== RUN   TestCWSAlertsV2
+Connecting over SSH
+Connection succeeded
+=== RUN   TestCWSAlertsV2/curl_to_metadata_service
+=== PAUSE TestCWSAlertsV2/curl_to_metadata_service
+=== RUN   TestCWSAlertsV2/java_spawns_shell
+=== PAUSE TestCWSAlertsV2/java_spawns_shell
+=== CONT  TestCWSAlertsV2/java_spawns_shell
+=== CONT  TestCWSAlertsV2/curl_to_metadata_service
+2022/06/16 16:26:02 curl to metadata service: Confirmed that the expected signal (Datadog security signal 'EC2 Instance Metadata Service Accessed via Network Utility') was created in Datadog (took 11 seconds).
+2022/06/16 16:26:02 curl to metadata service: All assertions passed
+2022/06/16 16:26:02 java spawns shell: Confirmed that the expected signal (Datadog security signal 'Java process spawned shell/utility') was created in Datadog (took 17 seconds).
+2022/06/16 16:26:02 java spawns shell: All assertions passed
+--- PASS: TestCWSAlertsV2 (0.06s)
+    --- PASS: TestCWSAlertsV2/java_spawns_shell (20.12s)
+    --- PASS: TestCWSAlertsV2/curl_to_metadata_service (20.24s)
+PASS
+```
+
+<Tip>
+  `NewSSHCommandExecutor` accepts an empty string for username and key file when those values are defined in your `~/.ssh/config` for the given hostname.
+</Tip>
+
+---
+
+## Local command detonation
+
+Runs commands on the local machine and waits for CWS signals. Useful when the Datadog Agent with CWS is running on the same host as your tests.
+
+```go local_detonator_test.go
+package programmatic_usage
+
+import (
+    "fmt"
+    _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // Note: This import is needed
+    . "github.com/datadog/threatest/pkg/threatest"
+    . "github.com/datadog/threatest/pkg/threatest/detonators"
+    . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+    "testing"
+    "time"
+)
+
+func TestLocalDetonator(t *testing.T) {
+    localExecutor := &LocalCommandExecutor{}
+
+    threatest := Threatest()
+
+    threatest.Scenario("curl to metadata service").
+        WhenDetonating(NewCommandDetonator(localExecutor, "curl http://169.254.169.254 --connect-timeout 5")).
+        Expect(DatadogSecuritySignal("EC2 Instance Metadata Service Accessed via Network Utility")).
+        WithTimeout(1 * time.Second)
+
+    threatest.Scenario("Java spawning shell").
+        WhenDetonating(NewCommandDetonator(localExecutor, `cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"`)).
+        Expect(DatadogSecuritySignal("Java process spawned shell/utility")).
+        WithTimeout(1 * time.Second)
+
+    if err := threatest.Run(); err != nil {
+        fmt.Println("Test failed: " + err.Error())
+        t.Fail()
+    }
+}
+```
+
+**Setup:**
+
+```bash
+export DD_API_KEY=<your-api-key>
+export DD_APP_KEY=<your-app-key>
+```
+
+**Run:**
+
+```bash
+go test local_detonator_test.go -v
+```
+
+**Sample output (when signals are found):**
+
+```
+=== RUN   TestLocalDetonator
+Executing curl http://169.254.169.254 --connect-timeout 5
+Executing cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"
+--- PASS: TestLocalDetonator (38.10s)
+PASS
+ok      command-line-arguments  38.121s
+```
+
+**Sample output (when signals are not found within the timeout):**
+
+```
+=== RUN   TestLocalDetonator
+Executing curl http://169.254.169.254 --connect-timeout 5
+Executing cp /bin/bash /tmp/java; /tmp/java -c "curl 1.1.1.1"
+Test failed: At least one scenario failed:
+
+curl to metadata service returned: curl to metadata service: 1 assertions did not pass
+ => Did not find Datadog security signal 'EC2 Instance Metadata Service Accessed via Network Utility'
+Java spawning shell returned: Java spawning shell: 1 assertions did not pass
+ => Did not find Datadog security signal 'Java process spawned shell/utility'
+
+--- FAIL: TestLocalDetonator (361.94s)
+```
+
+---
+
+## Custom AWS detonator
+
+Uses the AWS SDK directly to perform API calls, with the detonation UUID automatically injected into the `User-Agent` header. This allows the Datadog matcher to correlate the specific API call to the signal it triggers.
+
+```go custom_aws_detonator_test.go
+package programmatic_usage
+
+import (
+    "context"
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/service/iam"
+    . "github.com/datadog/threatest/pkg/threatest"
+    . "github.com/datadog/threatest/pkg/threatest/detonators"
+    "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+    "github.com/google/uuid"
+    "github.com/stretchr/testify/assert"
+    "testing"
+    "time"
+)
+
+func TestCustomAWSDetonator(t *testing.T) {
+    threatest := Threatest()
+    threatest.Scenario("create admin IAM user").
+        WhenDetonating(NewAWSDetonator(func(awsConfig aws.Config, detonationUuid uuid.UUID) error {
+            iamClient := iam.NewFromConfig(awsConfig)
+            username := aws.String("my-user-foo")
+            policy := aws.String("arn:aws:iam::aws:policy/AdministratorAccess")
+
+            // create an IAM user
+            _, err := iamClient.CreateUser(context.Background(), &iam.CreateUserInput{UserName: username})
+            assert.Nil(t, err)
+
+            // assign it an administrator policy
+            _, err = iamClient.AttachUserPolicy(context.Background(), &iam.AttachUserPolicyInput{PolicyArn: policy, UserName: username})
+            assert.Nil(t, err)
+
+            // cleanup
+            _, err = iamClient.DetachUserPolicy(context.Background(), &iam.DetachUserPolicyInput{UserName: username, PolicyArn: policy})
+            assert.Nil(t, err)
+            _, err = iamClient.DeleteUser(context.Background(), &iam.DeleteUserInput{UserName: username})
+            assert.Nil(t, err)
+
+            return nil
+        })).
+        Expect(datadog.DatadogSecuritySignal("AWS IAM privileged policy was applied to a user")).
+        WithTimeout(15 * time.Minute)
+
+    assert.Nil(t, threatest.Run())
+}
+```
+
+<Note>
+  The `awsConfig` passed into `NewAWSDetonator`'s function is pre-configured with a custom middleware that sets the `User-Agent` header to `threatest_<uuid>`. Do not replace or override this config — use it as-is to create your AWS service clients.
+</Note>
+
+<Warning>
+  This example creates and deletes a real IAM user with `AdministratorAccess`. Ensure you run it in a non-production AWS account and that your IAM credentials have the necessary permissions.
+</Warning>
+
+**Run:**
+
+```bash
+go test -timeout 99999s custom_aws_detonator_test.go -v
+```

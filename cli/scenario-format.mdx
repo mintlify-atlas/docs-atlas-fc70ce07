@@ -1,0 +1,235 @@
+---
+title: "Scenario file format"
+description: "Reference for the Threatest YAML scenario file format, including all detonator types and expectation options."
+---
+
+Threatest scenario files are YAML documents that describe one or more attack scenarios. Each scenario specifies how to detonate an attack and what security signals you expect to see in response.
+
+## File structure
+
+A scenario file contains a top-level `scenarios` key with an array of scenario objects.
+
+```yaml
+scenarios:
+  - name: <string>
+    detonate:
+      <detonator-type>:
+        ...
+    expectations:
+      - timeout: <duration>
+        <assertion-type>:
+          ...
+```
+
+### Top-level fields
+
+<ParamField path="scenarios" type="object[]" required>
+  An array of scenario definitions. Must contain at least one entry.
+</ParamField>
+
+### Scenario fields
+
+<ParamField path="name" type="string" required>
+  A human-readable description of the scenario. This value appears in log output and in the JSON results file when using `--output`.
+</ParamField>
+
+<ParamField path="detonate" type="object" required>
+  Defines how to trigger the attack. Must contain exactly one detonator type.
+</ParamField>
+
+<ParamField path="expectations" type="object[]" required>
+  An array of assertions to verify after detonation. Must contain at least one entry.
+</ParamField>
+
+---
+
+## Detonators
+
+The `detonate` block accepts exactly one of the following detonator types.
+
+<Tabs>
+  <Tab title="localDetonator">
+    Runs commands on the local machine where `threatest run` is executed.
+
+    ```yaml
+    detonate:
+      localDetonator:
+        commands:
+          - "curl http://169.254.169.254 --connect-timeout 1"
+    ```
+
+    <ParamField path="localDetonator.commands" type="string[]">
+      List of shell commands to execute locally. Multiple commands are joined with `; ` and run as a single shell invocation, sharing one detonation UUID.
+    </ParamField>
+  </Tab>
+
+  <Tab title="remoteDetonator">
+    Runs commands on a remote host over SSH. Requires SSH connection details passed via `--ssh-host` (and optionally `--ssh-username` and `--ssh-key`) when running `threatest run`.
+
+    ```yaml
+    detonate:
+      remoteDetonator:
+        commands:
+          - "curl http://169.254.169.254 --connect-timeout 1"
+          - "whoami"
+    ```
+
+    <ParamField path="remoteDetonator.commands" type="string[]">
+      List of shell commands to execute on the remote host over SSH. Multiple commands are joined with `; ` and run as a single shell invocation, sharing one detonation UUID.
+    </ParamField>
+
+    <Note>
+      SSH connection details (`--ssh-host`, `--ssh-username`, `--ssh-key`) are provided as CLI flags to `threatest run`, not in the scenario file itself. This allows the same scenario file to target different environments.
+    </Note>
+  </Tab>
+
+  <Tab title="stratusRedTeamDetonator">
+    Detonates a [Stratus Red Team](https://stratus-red-team.cloud) attack technique. You must be authenticated to the relevant cloud provider before running.
+
+    ```yaml
+    detonate:
+      stratusRedTeamDetonator:
+        attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+    ```
+
+    <ParamField path="stratusRedTeamDetonator.attackTechnique" type="string">
+      The Stratus Red Team technique ID to detonate. See the [full list of techniques](https://stratus-red-team.cloud/attack-techniques/list/).
+    </ParamField>
+
+    <Tip>
+      This is equivalent to manually running `stratus detonate <technique-id>`. Threatest handles warm-up and clean-up automatically.
+    </Tip>
+  </Tab>
+
+  <Tab title="awsCliDetonator">
+    Runs an AWS CLI script to simulate an attack. Requires valid AWS credentials in the environment.
+
+    ```yaml
+    detonate:
+      awsCliDetonator:
+        script: |
+          aws s3api list-buckets
+          aws iam list-users
+    ```
+
+    <ParamField path="awsCliDetonator.script" type="string">
+      A shell script containing AWS CLI commands to execute. Use a YAML block scalar (`|`) for multi-line scripts.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+---
+
+## Expectations
+
+Each entry in the `expectations` array defines an assertion to check after detonation. Currently, `datadogSecuritySignal` is the supported assertion type.
+
+<ParamField path="timeout" type="string" default="5m">
+  The maximum time to wait for assertions to be satisfied, written as a Go duration string (e.g. `1m`, `15m`, `2h`). Defaults to `5m` if omitted. When a scenario has multiple expectations, the timeout from the **first** expectation applies to the entire scenario.
+</ParamField>
+
+<ParamField path="datadogSecuritySignal" type="object">
+  Asserts that a Datadog Cloud SIEM security signal matching the given criteria appears within the timeout.
+
+  <ParamField path="datadogSecuritySignal.name" type="string" required>
+    The exact title of the Datadog security signal to match. This is an exact string match.
+  </ParamField>
+
+  <ParamField path="datadogSecuritySignal.severity" type="string">
+    The severity of the signal to match. When specified, both the name and severity must match. Common values: `info`, `low`, `medium`, `high`, `critical`.
+  </ParamField>
+</ParamField>
+
+---
+
+## Complete examples
+
+<CodeGroup>
+
+```yaml Remote detonation with SSH
+scenarios:
+  - name: curl metadata service
+    detonate:
+      remoteDetonator:
+        commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+    expectations:
+      - timeout: 1m
+        datadogSecuritySignal:
+          name: "Network utility accessed cloud metadata service"
+          severity: medium
+```
+
+```yaml Stratus Red Team detonation
+scenarios:
+  - name: opening a security group to the Internet
+    detonate:
+      stratusRedTeamDetonator:
+        attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+    expectations:
+      - timeout: 15m
+        datadogSecuritySignal:
+          name: "Potential administrative port open to the world via AWS security group"
+```
+
+```yaml Multiple scenarios in one file
+scenarios:
+  - name: curl metadata service
+    detonate:
+      remoteDetonator:
+        commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+    expectations:
+      - timeout: 1m
+        datadogSecuritySignal:
+          name: "Network utility accessed cloud metadata service"
+          severity: medium
+
+  - name: opening a security group to the Internet
+    detonate:
+      stratusRedTeamDetonator:
+        attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+    expectations:
+      - timeout: 15m
+        datadogSecuritySignal:
+          name: "Potential administrative port open to the world via AWS security group"
+```
+
+```yaml AWS CLI detonation
+scenarios:
+  - name: enumerate IAM users
+    detonate:
+      awsCliDetonator:
+        script: |
+          aws iam list-users
+          aws iam list-roles
+    expectations:
+      - timeout: 5m
+        datadogSecuritySignal:
+          name: "AWS IAM enumeration"
+          severity: medium
+```
+
+</CodeGroup>
+
+---
+
+## IDE integration
+
+You can associate the Threatest JSON schema with your scenario files to get in-editor validation, autocompletion, and hover documentation.
+
+### VSCode with the YAML extension
+
+Install the [Red Hat YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml) and add the following to your `.vscode/settings.json`:
+
+```json
+{
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/DataDog/threatest/main/schemas/threatest.schema.json": "*.threatest.yaml"
+  }
+}
+```
+
+This associates the schema with any file matching `*.threatest.yaml` in your workspace.
+
+<Tip>
+  By convention, name your scenario files with the `.threatest.yaml` suffix (e.g. `scenarios.threatest.yaml`) to make the schema association easy to configure and to distinguish them from other YAML files in your project.
+</Tip>

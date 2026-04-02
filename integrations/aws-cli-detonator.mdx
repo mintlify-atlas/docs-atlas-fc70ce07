@@ -1,0 +1,169 @@
+---
+title: "AWS CLI detonator"
+description: "Execute arbitrary AWS CLI scripts as attack simulations with automatic UUID injection."
+---
+
+The AWS CLI detonator runs a shell script using `bash -c`, with the AWS CLI available in `PATH`. It is useful when you want to simulate an attack using raw `aws` CLI commands rather than a pre-packaged Stratus Red Team technique—for example, to test a detection for a very specific API call sequence.
+
+## How UUID injection works
+
+Before executing your script, Threatest generates a UUID and sets it as the `AWS_EXECUTION_ENV` environment variable:
+
+```
+AWS_EXECUTION_ENV=threatest_<uuid>
+```
+
+The AWS CLI reads `AWS_EXECUTION_ENV` and appends its value to the `User-Agent` header on every request. Threatest's alert matchers later search for the UUID within matched Datadog signals to confirm the alert is attributable to this exact detonation run.
+
+The script inherits your current shell environment (via `os.Environ()`), so any AWS credentials, `AWS_PROFILE`, `AWS_REGION`, or other environment variables you have configured are passed through automatically.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install the AWS CLI">
+    The `aws` binary must be available on `PATH` when Threatest runs.
+
+    ```bash
+    # macOS
+    brew install awscli
+
+    # Linux
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+    unzip awscliv2.zip && sudo ./aws/install
+    ```
+  </Step>
+  <Step title="Authenticate to AWS">
+    Threatest checks for valid AWS credentials before running your script. Configure them using any standard method.
+
+    ```bash
+    aws configure
+    # or
+    export AWS_ACCESS_KEY_ID=...
+    export AWS_SECRET_ACCESS_KEY=...
+    export AWS_SESSION_TOKEN=...
+    ```
+
+    If credentials are not found or are expired, Threatest returns an error before executing the script.
+  </Step>
+</Steps>
+
+## Usage
+
+<Tabs>
+  <Tab title="CLI (YAML)">
+    Use `awsCliDetonator.script` to provide a multi-line bash script. Use a YAML block scalar (`|`) to preserve newlines.
+
+    ```yaml
+    scenarios:
+      - name: opening a security group to the Internet
+        detonate:
+          awsCliDetonator:
+            script: |
+              set -e
+
+              # Setup
+              vpc=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query Vpc.VpcId --output text)
+              sg=$(aws ec2 create-security-group \
+                --group-name sample-sg \
+                --description "Test security group" \
+                --vpc-id $vpc \
+                --query GroupId --output text)
+
+              # Open port 22 to the world
+              aws ec2 authorize-security-group-ingress \
+                --group-id $sg \
+                --protocol tcp \
+                --port 22 \
+                --cidr 0.0.0.0/0
+
+              # Cleanup
+              aws ec2 delete-security-group --group-id $sg
+              aws ec2 delete-vpc --vpc-id $vpc
+        expectations:
+          - timeout: 15m
+            datadogSecuritySignal:
+              name: "Potential administrative port open to the world via AWS security group"
+    ```
+
+    Run the scenario:
+
+    ```bash
+    threatest run scenarios.threatest.yaml
+    ```
+  </Tab>
+  <Tab title="Go">
+    Pass the script as a string to `NewAWSCLIDetonator()`.
+
+    ```go
+    package mytest
+
+    import (
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestSecurityGroupOpenToInternet(t *testing.T) {
+        script := `
+    set -e
+    vpc=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query Vpc.VpcId --output text)
+    sg=$(aws ec2 create-security-group --group-name sample-sg --description "Test security group" --vpc-id $vpc --query GroupId --output text)
+    aws ec2 authorize-security-group-ingress --group-id $sg --protocol tcp --port 22 --cidr 0.0.0.0/0
+    aws ec2 delete-security-group --group-id $sg
+    aws ec2 delete-vpc --vpc-id $vpc
+    `
+
+        threatest := Threatest()
+
+        threatest.Scenario("opening a security group to the Internet").
+            WhenDetonating(NewAWSCLIDetonator(script)).
+            Expect(DatadogSecuritySignal("Potential administrative port open to the world via AWS security group")).
+            WithTimeout(15 * time.Minute)
+
+        require.Nil(t, threatest.Run())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration
+
+<ParamField path="awsCliDetonator.script" type="string" required>
+  A bash script to execute. The script runs with `bash -c` and has access to the full environment, including AWS credentials and the AWS CLI. The `AWS_EXECUTION_ENV` variable is set automatically—do not override it.
+</ParamField>
+
+## Cleanup
+
+Threatest does not manage AWS resource cleanup for CLI scripts. Your script is responsible for deleting any resources it creates. Use `set -e` at the top of your script so that a failed AWS call stops execution before reaching cleanup steps, and structure your script to clean up after the attack action:
+
+```bash
+set -e
+
+# 1. Create the resource
+sg=$(aws ec2 create-security-group ...)
+
+# 2. Execute the attack
+aws ec2 authorize-security-group-ingress --group-id $sg ...
+
+# 3. Clean up immediately after
+aws ec2 delete-security-group --group-id $sg
+```
+
+<Warning>
+  If your script exits before the cleanup section (e.g., due to an error), AWS resources will remain in your account. Consider wrapping cleanup in a trap:
+
+  ```bash
+  set -e
+  sg=$(aws ec2 create-security-group ...)
+  trap "aws ec2 delete-security-group --group-id $sg" EXIT
+
+  aws ec2 authorize-security-group-ingress --group-id $sg ...
+  ```
+</Warning>
+
+<Tip>
+  Use `--query` and `--output text` in your AWS CLI commands to extract resource IDs into variables for use in subsequent commands and cleanup steps.
+</Tip>

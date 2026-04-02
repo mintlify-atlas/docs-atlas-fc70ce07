@@ -1,80 +1,169 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Run your first threat detection test in minutes using the Threatest CLI or Go library."
 ---
 
-## Get started in three steps
+Threatest has two modes: a **CLI** for running YAML-defined scenarios and a **Go library** for writing detection tests as Go test functions. Choose the path that fits your workflow.
 
-Get your documentation site running locally and make your first customization.
+<Tabs>
+  <Tab title="CLI">
 
-### Step 1: Set up your local environment
+## CLI quickstart
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Install Threatest">
+    Install the CLI using Homebrew:
 
-### Step 2: Deploy your changes
+    ```bash
+    brew tap datadog/threatest https://github.com/datadog/threatest
+    brew install datadog/threatest/threatest
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    Or download a binary from the [GitHub releases page](https://github.com/DataDog/threatest/releases).
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Set your Datadog credentials">
+    Export your Datadog API and application keys:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    export DD_API_KEY=your_api_key_here
+    export DD_APP_KEY=your_app_key_here
+    # Optional: set the Datadog site (defaults to datadoghq.com)
+    export DD_SITE=datadoghq.com
+    ```
 
-### Step 3: Go live
+    <Note>
+      You need a Datadog API key and an application key with `security_monitoring_signals_read` and `security_monitoring_signals_write` permissions.
+    </Note>
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Write a scenario file">
+    Create a file named `scenarios.threatest.yaml`. Here's an example that detonates an SSH command and checks for a Datadog Cloud Workload Security signal:
+
+    ```yaml scenarios.threatest.yaml
+    scenarios:
+      - name: curl metadata service
+        detonate:
+          remoteDetonator:
+            commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+        expectations:
+          - timeout: 1m
+            datadogSecuritySignal:
+              name: "Network utility accessed cloud metadata service"
+              severity: medium
+    ```
+  </Step>
+
+  <Step title="Lint the scenario file">
+    Validate the file before running it:
+
+    ```bash
+    threatest lint scenarios.threatest.yaml
+    # All 1 scenarios are syntaxically valid
+    ```
+  </Step>
+
+  <Step title="Run the scenario">
+    Execute the scenario against an SSH-accessible host:
+
+    ```bash
+    threatest run scenarios.threatest.yaml \
+      --ssh-host test-box \
+      --ssh-username vagrant
+    ```
+
+    To save results to a JSON file for CI/CD:
+
+    ```bash
+    threatest run scenarios.threatest.yaml \
+      --ssh-host test-box \
+      --ssh-username vagrant \
+      --output results.json
+    ```
+  </Step>
+</Steps>
+
+  </Tab>
+  <Tab title="Go library">
+
+## Go library quickstart
+
+<Steps>
+  <Step title="Add the dependency">
+    In your Go module:
+
+    ```bash
+    go get github.com/datadog/threatest
+    ```
+  </Step>
+
+  <Step title="Set your Datadog credentials">
+    Export your Datadog API and application keys:
+
+    ```bash
+    export DD_API_KEY=your_api_key_here
+    export DD_APP_KEY=your_app_key_here
+    ```
+  </Step>
+
+  <Step title="Write a test">
+    Create a test file. This example tests a Cloud Workload Security signal triggered over SSH:
+
+    ```go cws_test.go
+    package detection_test
+
+    import (
+        . "github.com/datadog/threatest/pkg/threatest"
+        . "github.com/datadog/threatest/pkg/threatest/detonators"
+        . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+        "github.com/stretchr/testify/require"
+        "testing"
+        "time"
+    )
+
+    func TestCWSAlert(t *testing.T) {
+        ssh, err := NewSSHCommandExecutor("test-box", "", "")
+        if err != nil {
+            t.Fatal(err)
+        }
+
+        runner := Threatest()
+
+        runner.Scenario("curl to metadata service").
+            WhenDetonating(NewCommandDetonator(ssh, "curl http://169.254.169.254 --connect-timeout 5")).
+            Expect(DatadogSecuritySignal("EC2 Instance Metadata Service Accessed via Network Utility")).
+            WithTimeout(1 * time.Minute)
+
+        require.Nil(t, runner.Run())
+    }
+    ```
+  </Step>
+
+  <Step title="Run the test">
+    ```bash
+    go test ./... -v -run TestCWSAlert
+    ```
+
+    You should see output indicating the scenario ran and whether the expected signal was found within the timeout.
+  </Step>
+</Steps>
+
+  </Tab>
+</Tabs>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" icon="download" href="/installation">
+    All installation methods, including binary releases and Docker
+  </Card>
+  <Card title="Scenario format" icon="file-code" href="/cli/scenario-format">
+    Full YAML scenario schema reference
+  </Card>
+  <Card title="Writing tests in Go" icon="code" href="/programmatic/writing-tests">
+    Complete Go API reference and test patterns
+  </Card>
+  <Card title="Integrations" icon="plug" href="/integrations/stratus-red-team">
+    Stratus Red Team, SSH, AWS CLI, and Datadog integrations
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

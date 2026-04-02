@@ -1,0 +1,152 @@
+---
+title: "threatest run"
+description: "Run Threatest scenarios and validate that your detections fire as expected."
+---
+
+The `run` command executes one or more scenario files, detonates attacks according to each scenario's configuration, and asserts that the expected security signals are raised within the given timeout.
+
+## Syntax
+
+```bash
+threatest run [scenario-files...] [flags]
+```
+
+You must provide at least one scenario file. Multiple files are accepted and all scenarios across all files run together.
+
+```bash
+threatest run scenarios.threatest.yaml
+threatest run file1.yaml file2.yaml file3.yaml
+```
+
+## Flags
+
+<ParamField path="--ssh-host" type="string">
+  SSH host to connect to for remote command detonation. Required when any scenario uses `remoteDetonator`.
+
+  Alternatively, set the `THREATEST_SSH_HOST` environment variable.
+</ParamField>
+
+<ParamField path="--ssh-username" type="string">
+  SSH username to use when connecting to the remote host. Leave empty to use your system's SSH configuration (`~/.ssh/config`).
+
+  Alternatively, set the `THREATEST_SSH_USERNAME` environment variable.
+</ParamField>
+
+<ParamField path="--ssh-key" type="string">
+  Path to the SSH private key file to use for remote command detonation. Leave empty to use your system's SSH configuration.
+
+  Alternatively, set the `THREATEST_SSH_KEY` environment variable.
+
+  <Note>Only unencrypted (passphrase-free) SSH keys are currently supported.</Note>
+</ParamField>
+
+<ParamField path="--output" type="string">
+  Write JSON test results to the specified file path. If omitted, results are only printed to stdout.
+
+  Short form: `-o`
+</ParamField>
+
+<ParamField path="--max-parallelism" type="number" default="5">
+  Maximum number of scenarios to run concurrently. Threatest automatically caps the worker count at the number of scenarios, so setting this higher than the number of scenarios has no effect.
+
+  Alternatively, set the `THREATEST_MAX_PARALLELISM` environment variable.
+</ParamField>
+
+## Environment variables
+
+| Variable | Description |
+|---|---|
+| `THREATEST_SSH_HOST` | Equivalent to `--ssh-host` |
+| `THREATEST_SSH_USERNAME` | Equivalent to `--ssh-username` |
+| `THREATEST_SSH_KEY` | Equivalent to `--ssh-key` |
+| `THREATEST_MAX_PARALLELISM` | Equivalent to `--max-parallelism` (default: `5`) |
+| `THREATEST_DEBUG=1` | Enable debug-level logging |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | All scenarios passed |
+| `1` | At least one scenario failed, or an error occurred |
+
+## Examples
+
+<CodeGroup>
+
+```bash Local detonation
+threatest run scenarios.threatest.yaml
+```
+
+```bash Remote detonation over SSH
+threatest run scenarios.threatest.yaml \
+  --ssh-host my-test-box \
+  --ssh-username ec2-user \
+  --ssh-key ~/.ssh/id_rsa
+```
+
+```bash Write results to a file
+threatest run scenarios.threatest.yaml \
+  --ssh-host my-test-box \
+  --output test-results.json
+```
+
+```bash Multiple scenario files with debug logging
+THREATEST_DEBUG=1 threatest run file1.yaml file2.yaml
+```
+
+```bash Using environment variables
+export THREATEST_SSH_HOST=my-test-box
+export THREATEST_SSH_USERNAME=ec2-user
+threatest run scenarios.threatest.yaml --output results.json
+```
+
+</CodeGroup>
+
+## JSON output format
+
+When `--output` is specified, Threatest writes a JSON array where each object represents a single scenario result.
+
+```json
+[
+  {
+    "description": "curl metadata service",
+    "isSuccess": true,
+    "errorMessage": "",
+    "durationSeconds": 20.175771331,
+    "timeDetonated": "2022-11-15T22:41:28.137922+01:00"
+  },
+  {
+    "description": "opening a security group to the Internet",
+    "isSuccess": true,
+    "errorMessage": "",
+    "durationSeconds": 114.920678743,
+    "timeDetonated": "2022-11-15T22:41:28.137932+01:00"
+  }
+]
+```
+
+### Result fields
+
+<ParamField path="description" type="string">
+  The `name` field from the scenario definition.
+</ParamField>
+
+<ParamField path="isSuccess" type="boolean">
+  `true` if all expectations were met within the timeout. `false` otherwise.
+</ParamField>
+
+<ParamField path="errorMessage" type="string">
+  Human-readable description of the failure. Empty string when `isSuccess` is `true`.
+</ParamField>
+
+<ParamField path="durationSeconds" type="number">
+  Total wall-clock time in seconds from detonation to assertion completion (or timeout).
+</ParamField>
+
+<ParamField path="timeDetonated" type="string">
+  ISO 8601 timestamp of when the scenario began executing.
+</ParamField>
+
+<Tip>
+  Use `--output` in CI pipelines to persist results as build artifacts for later inspection or reporting.
+</Tip>

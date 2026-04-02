@@ -1,0 +1,84 @@
+{
+  "projectType": "framework",
+  "projectName": "Threatest",
+  "projectDescription": "A CLI and Go framework for end-to-end testing of threat detection rules by detonating attack techniques and verifying security alerts.",
+  "theme": "aspen",
+  "primaryColor": "#040404",
+  "lightColor": "#764da5",
+  "darkColor": "#bca4d3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/detonators",
+              "concepts/alert-matchers",
+              "concepts/detonation-correlation"
+            ]
+          },
+          {
+            "group": "CLI Usage",
+            "pages": [
+              "cli/run",
+              "cli/lint",
+              "cli/scenario-format"
+            ]
+          },
+          {
+            "group": "Programmatic Usage",
+            "pages": [
+              "programmatic/getting-started",
+              "programmatic/writing-tests",
+              "programmatic/examples"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/stratus-red-team",
+              "integrations/ssh-detonator",
+              "integrations/aws-cli-detonator",
+              "integrations/datadog-signals"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "End-to-end threat detection testing via YAML scenarios or Go code",
+    "Multiple detonators: local commands, SSH, Stratus Red Team, AWS CLI",
+    "Datadog security signal verification with UUID-based correlation",
+    "Parallel scenario execution with configurable concurrency",
+    "JSON output for CI/CD pipeline integration",
+    "CLI linting for scenario file validation"
+  ],
+  "publicApiSurface": [
+    "Threatest() *TestRunner",
+    "TestRunner.Scenario(name string) *ScenarioBuilder",
+    "ScenarioBuilder.WhenDetonating(detonator Detonator) *ScenarioBuilder",
+    "ScenarioBuilder.Expect(matcher AlertGeneratedMatcher) *ScenarioBuilder",
+    "ScenarioBuilder.WithTimeout(timeout time.Duration) *ScenarioBuilder",
+    "TestRunner.Run() error",
+    "StratusRedTeamTechnique(ttp string) *StratusRedTeamDetonator",
+    "NewSSHCommandExecutor(hostname, username, keyFile string) (*SSHCommandExecutor, error)",
+    "NewCommandDetonator(executor, command) *CommandDetonator",
+    "NewAWSCLIDetonator(script string) *AWSCLIDetonator",
+    "DatadogSecuritySignal(name string) *DatadogAlertGeneratedAssertionBuilder",
+    "DatadogAlertGeneratedAssertionBuilder.WithSeverity(severity string) *DatadogAlertGeneratedAssertionBuilder",
+    "threatest run [scenario-file...] --ssh-host --ssh-username --ssh-key --output --max-parallelism",
+    "threatest lint [scenario-file...]"
+  ]
+}

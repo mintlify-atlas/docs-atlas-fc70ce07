@@ -1,0 +1,94 @@
+---
+title: "Overview"
+description: "How Threatest works: the three core abstractions and the test lifecycle."
+---
+
+Threatest is a Go framework and CLI for testing threat detection end-to-end. It lets you **detonate** an attack technique against a real environment and then **assert** that the expected alert was raised in your security platform — giving you confident, automated coverage of your detection rules.
+
+## Core abstractions
+
+Threatest is built around three composable concepts.
+
+<CardGroup cols={3}>
+  <Card title="Scenarios" icon="list-check">
+    The top-level unit of work. A scenario binds a name, a detonator, one or more alert matchers, and an optional timeout into a single, runnable test case.
+  </Card>
+  <Card title="Detonators" href="/concepts/detonators" icon="bolt">
+    Describe **how and where** an attack technique is executed — locally, over SSH, via Stratus Red Team, or through the AWS SDK/CLI.
+  </Card>
+  <Card title="Alert Matchers" href="/concepts/alert-matchers" icon="bell">
+    Platform-specific integrations that poll a security platform and verify whether the expected alert was generated for a given detonation.
+  </Card>
+</CardGroup>
+
+### How they compose
+
+A scenario is constructed fluently using the `ScenarioBuilder` API:
+
+```go
+threatest := Threatest()
+
+threatest.Scenario("AWS console login without MFA").
+    WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+    Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+    WithTimeout(15 * time.Minute)
+
+assert.NoError(t, threatest.Run())
+```
+
+Each call maps directly to one of the three abstractions:
+
+| Builder call | Abstraction |
+|---|---|
+| `Scenario("name")` | Creates and names a `Scenario` |
+| `WhenDetonating(detonator)` | Attaches a `Detonator` |
+| `Expect(matcher)` | Registers an `AlertGeneratedMatcher` |
+| `WithTimeout(duration)` | Sets the polling deadline |
+
+---
+
+## Test lifecycle
+
+Every scenario follows the same five-phase lifecycle when `Run()` is called.
+
+<Steps>
+  <Step title="Setup">
+    The `TestRunner` builds all registered scenarios from their builders. The default polling interval is 2 seconds and the default per-scenario timeout is 10 minutes.
+  </Step>
+  <Step title="Detonation">
+    `scenario.Detonator.Detonate()` is called. The detonator executes the attack technique and returns a **detonation UUID** — a unique identifier for this exact execution.
+
+    ```go
+    detonationUid, err := scenario.Detonator.Detonate()
+    ```
+  </Step>
+  <Step title="Polling">
+    The runner enters a polling loop. Every 2 seconds it calls `assertion.HasExpectedAlert(detonationUid)` for each unresolved assertion. Assertions that pass are removed from the queue; those that fail are re-queued for the next tick.
+  </Step>
+  <Step title="Assertion">
+    If all assertions resolve before the timeout, the scenario passes. If the deadline is reached with assertions still outstanding, the scenario fails with a descriptive error listing every unmatched alert.
+  </Step>
+  <Step title="Cleanup">
+    Regardless of outcome, `CleanupScenario` is called via `defer`. This invokes `assertion.Cleanup(detonationUid)`, which archives/closes any alerts that were generated — leaving the security platform in a clean state for the next run.
+  </Step>
+</Steps>
+
+<Note>
+  Cleanup runs even when a scenario times out or returns an error, because it is registered with `defer` immediately after a successful detonation.
+</Note>
+
+---
+
+## Further reading
+
+<CardGroup cols={3}>
+  <Card title="Detonators" href="/concepts/detonators" icon="bolt">
+    All available detonator types, construction signatures, and usage examples.
+  </Card>
+  <Card title="Alert Matchers" href="/concepts/alert-matchers" icon="bell">
+    The `AlertGeneratedMatcher` interface and the Datadog Security Signals integration.
+  </Card>
+  <Card title="Detonation Correlation" href="/concepts/detonation-correlation" icon="link">
+    How the UUID ties a detonation to its alerts and prevents false positives.
+  </Card>
+</CardGroup>

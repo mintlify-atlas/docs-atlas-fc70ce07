@@ -1,0 +1,137 @@
+---
+title: 'Getting started'
+description: 'Use Threatest as a Go library to write detection tests programmatically.'
+---
+
+Threatest can be embedded directly in Go test files. You write standard `testing.T`-based tests, call `threatest.Run()`, and assert on the result. This page covers installation, credentials, and a minimal working test.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install Go">
+    Threatest requires Go 1.22 or later. Verify your installation:
+
+    ```bash
+    go version
+    ```
+  </Step>
+
+  <Step title="Export Datadog credentials">
+    The Datadog matcher reads credentials from environment variables. Export them before running tests:
+
+    ```bash
+    export DD_API_KEY=<your-api-key>
+    export DD_APP_KEY=<your-app-key>
+    ```
+
+    Optionally set `DD_SITE` if your organization is not on `datadoghq.com`:
+
+    ```bash
+    export DD_SITE=datadoghq.eu
+    ```
+
+    <Note>
+      `DD_SITE` defaults to `datadoghq.com` when the variable is not set.
+    </Note>
+  </Step>
+
+  <Step title="Add the dependency">
+    In your Go module, add the Threatest package:
+
+    ```bash
+    go get github.com/datadog/threatest
+    ```
+
+    Your `go.mod` will include an entry like:
+
+    ```go go.mod
+    require (
+        github.com/datadog/threatest v0.x.y
+    )
+    ```
+  </Step>
+</Steps>
+
+## Import paths
+
+Threatest is split into three packages you will import in most test files:
+
+| Package | Purpose |
+|---|---|
+| `github.com/datadog/threatest/pkg/threatest` | Core runner and builder (`Threatest()`, `Scenario()`, `Run()`) |
+| `github.com/datadog/threatest/pkg/threatest/detonators` | Attack execution (`StratusRedTeamTechnique`, `NewCommandDetonator`, `NewAWSDetonator`, etc.) |
+| `github.com/datadog/threatest/pkg/threatest/matchers/datadog` | Datadog signal assertion (`DatadogSecuritySignal()`) |
+
+The examples in this documentation use dot-imports (`. "github.com/..."`) to match the naming style used in the official examples. This is optional — you can import with a package alias if you prefer.
+
+## A minimal test
+
+The following is a complete, runnable test that detonates an AWS attack technique with Stratus Red Team and asserts that a Cloud SIEM signal appears in Datadog:
+
+```go minimal_test.go
+package mydetectiontests
+
+import (
+    _ "github.com/datadog/stratus-red-team/v2/pkg/stratus/loader" // required for technique registration
+    . "github.com/datadog/threatest/pkg/threatest"
+    . "github.com/datadog/threatest/pkg/threatest/detonators"
+    . "github.com/datadog/threatest/pkg/threatest/matchers/datadog"
+    "github.com/stretchr/testify/require"
+    "testing"
+    "time"
+)
+
+func TestAWSConsoleLoginWithoutMFA(t *testing.T) {
+    threatest := Threatest()
+
+    threatest.Scenario("AWS console login without MFA").
+        WhenDetonating(StratusRedTeamTechnique("aws.initial-access.console-login-without-mfa")).
+        Expect(DatadogSecuritySignal("AWS Console login without MFA").WithSeverity("medium")).
+        WithTimeout(10 * time.Minute)
+
+    require.Nil(t, threatest.Run())
+}
+```
+
+<Note>
+  The blank import of `github.com/datadog/stratus-red-team/v2/pkg/stratus/loader` is required whenever you use `StratusRedTeamTechnique`. It registers all attack techniques in the Stratus Red Team registry at package init time.
+</Note>
+
+Run it with an extended timeout to allow for signal propagation:
+
+```bash
+go test -timeout 99999s -v ./...
+```
+
+## The builder pattern
+
+Every Threatest test follows the same five-step chain:
+
+```go
+threatest := Threatest()                           // 1. Create a runner
+
+threatest.Scenario("name").                        // 2. Name the scenario
+    WhenDetonating(detonator).                     // 3. Specify the detonator
+    Expect(matcher).                               // 4. Declare an assertion
+    WithTimeout(10 * time.Minute)                  // 5. (Optional) Set per-scenario timeout
+
+err := threatest.Run()                             // 6. Execute all scenarios
+```
+
+Each method on `ScenarioBuilder` returns `*ScenarioBuilder`, so calls chain fluently. `Expect()` can be called multiple times on the same scenario to assert on multiple signals.
+
+### Using testify/require
+
+`threatest.Run()` returns a plain `error`. The idiomatic way to fail the test immediately on error is `require.Nil`:
+
+```go
+require.Nil(t, threatest.Run())
+```
+
+Alternatively, use `assert.Nil` if you want the test to continue after a failure, or handle the error manually:
+
+```go
+if err := threatest.Run(); err != nil {
+    t.Fatal(err)
+}
+```

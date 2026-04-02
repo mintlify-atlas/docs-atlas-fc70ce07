@@ -1,0 +1,91 @@
+---
+title: "threatest lint"
+description: "Validate the syntax and structure of Threatest scenario files without running them."
+---
+
+The `lint` command parses one or more scenario files and checks that each scenario is structurally valid. It does not connect to any remote hosts, detonate any attacks, or make any API calls.
+
+## Syntax
+
+```bash
+threatest lint [scenario-files...]
+```
+
+You must provide at least one scenario file. Multiple files are accepted.
+
+```bash
+threatest lint scenarios.threatest.yaml
+threatest lint file1.yaml file2.yaml
+```
+
+## What it checks
+
+For each scenario in every file, `lint` verifies:
+
+- **The file is parseable** — valid YAML that conforms to the Threatest schema.
+- **A detonator is defined** — the `detonate` block specifies exactly one of `localDetonator`, `remoteDetonator`, `stratusRedTeamDetonator`, or `awsCliDetonator`.
+- **At least one expectation is defined** — the `expectations` array is not empty.
+
+<Note>
+  `lint` does not validate that SSH credentials are reachable, that AWS credentials are present, or that referenced Stratus Red Team techniques exist. It only checks the file structure.
+</Note>
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | All scenarios in all files are valid |
+| `1` | At least one scenario is invalid, or a file could not be read or parsed |
+
+## Example
+
+Given the following `scenarios.threatest.yaml`:
+
+```yaml
+scenarios:
+  - name: curl metadata service
+    detonate:
+      remoteDetonator:
+        commands: ["curl http://169.254.169.254 --connect-timeout 1"]
+    expectations:
+      - timeout: 1m
+        datadogSecuritySignal:
+          name: "Network utility accessed cloud metadata service"
+          severity: medium
+
+  - name: opening a security group to the Internet
+    detonate:
+      stratusRedTeamDetonator:
+        attackTechnique: aws.exfiltration.ec2-security-group-open-port-22-ingress
+    expectations:
+      - timeout: 15m
+        datadogSecuritySignal:
+          name: "Potential administrative port open to the world via AWS security group"
+```
+
+Running `lint` produces:
+
+```bash
+$ threatest lint scenarios.threatest.yaml
+INFO All 2 scenarios are syntaxically valid
+```
+
+## When to use lint
+
+<Tip>
+  Run `threatest lint` in your CI pipeline before `threatest run` to catch structural errors early, without consuming cloud resources or triggering real attack detonations.
+</Tip>
+
+A typical CI workflow:
+
+```bash
+# Validate scenario files first
+threatest lint scenarios.threatest.yaml
+
+# Then run them if validation passes
+threatest run scenarios.threatest.yaml \
+  --ssh-host "$THREATEST_SSH_HOST" \
+  --output test-results.json
+```
+
+This is especially useful when scenario files are authored by multiple contributors — `lint` gives fast, cheap feedback on pull requests before any infrastructure is touched.
